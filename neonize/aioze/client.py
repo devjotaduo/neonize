@@ -46,6 +46,10 @@ from .._binder import (
 # Goroutines do whatsmeow (ex.: FrameSocket.readPump) chamam as
 # callbacks depois de o connect retornar e até depois de o objeto
 # cliente morrer; thunk coletado pelo GC = SIGSEGV no call de volta.
+import contextvars as _contextvars
+import functools as _functools
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+
 _LIVE_CONNECT_REFS: list = []
 
 
@@ -218,6 +222,29 @@ SyncFunctionParams = ParamSpec("SyncFunctionParams")
 ReturnType = TypeVar("ReturnType")
 
 
+# jotaduo 0.4.3.4: o FFI não usa mais o default executor do loop.
+# `Neonize()` é uma chamada Go bloqueante que só retorna no `Stop()`, ou
+# seja, prende uma thread por cliente PARA SEMPRE. No default executor
+# (min(32, cpu+4)) isso consome as vagas do app hospedeiro inteiro e faz
+# as chamadas curtas (IsConnected etc.) enfileirarem atrás dos connects.
+_FFI_BLOCKING_EXECUTOR = _ThreadPoolExecutor(
+    max_workers=256, thread_name_prefix="neonize-blocking"
+)
+_FFI_CALL_EXECUTOR = _ThreadPoolExecutor(
+    max_workers=64, thread_name_prefix="neonize-call"
+)
+# Métodos que bloqueiam pela vida inteira da sessão.
+_FFI_BLOCKING_NAMES = frozenset({"Neonize"})
+
+
+async def _to_thread_on(executor, func, /, *args, **kwargs):
+    """`asyncio.to_thread` com executor explícito (mesma semântica de contexto)."""
+    loop = asyncio.get_running_loop()
+    ctx = _contextvars.copy_context()
+    call = _functools.partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(executor, call)
+
+
 class GoCode:
     @staticmethod
     def execute_sync_function(
@@ -226,13 +253,19 @@ class GoCode:
         def call(
             *args: SyncFunctionParams.args, **kwargs: SyncFunctionParams.kwargs
         ) -> Awaitable[ReturnType]:
-            return asyncio.to_thread(func, *args, **kwargs)
+            return _to_thread_on(_FFI_CALL_EXECUTOR, func, *args, **kwargs)
 
         return call
 
     def __getattr__(self, name: str, /) -> Any:
+        executor = (
+            _FFI_BLOCKING_EXECUTOR
+            if name in _FFI_BLOCKING_NAMES
+            else _FFI_CALL_EXECUTOR
+        )
+
         def call(*args, **kwargs):
-            return asyncio.to_thread(getattr(gocode, name), *args, **kwargs)
+            return _to_thread_on(executor, getattr(gocode, name), *args, **kwargs)
 
         return call
 
