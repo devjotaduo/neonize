@@ -42,6 +42,13 @@ from .._binder import (
     ProxySettings,
     gocode,
 )
+# jotaduo 0.4.3.3: thunks ctypes entregues ao Go vivem para sempre.
+# Goroutines do whatsmeow (ex.: FrameSocket.readPump) chamam as
+# callbacks depois de o connect retornar e até depois de o objeto
+# cliente morrer; thunk coletado pelo GC = SIGSEGV no call de volta.
+_LIVE_CONNECT_REFS: list = []
+
+
 from ..builder import build_edit, build_revoke
 from ..exc import (
     BuildPollVoteCreationError,
@@ -3378,6 +3385,17 @@ class NewAClient:
             proxy_ref = ctypes.byref(c_settings)
 
         # Initiate connection to the server
+        connect_refs = (
+            func_string(self.__onQr),
+            func_string(self.__onLoginStatus),
+            func_callback_bytes(self.event.execute),
+            func_callback_bytes2(log_whatsmeow),
+            (ctypes.c_char * len(self.event.list_func)).from_buffer(d),
+            d,
+        )
+        _LIVE_CONNECT_REFS.append(connect_refs)
+        qr_cb, login_cb, event_cb, log_cb, subscriber_buf, _ = connect_refs
+
         async def _connect_and_check():
             try:
                 err = await self.__client.Neonize(
@@ -3386,11 +3404,11 @@ class NewAClient:
                     jidbuf,
                     jidbuf_size,
                     LogLevel.from_logging(log.level).level,
-                    func_string(self.__onQr),
-                    func_string(self.__onLoginStatus),
-                    func_callback_bytes(self.event.execute),
-                    func_callback_bytes2(log_whatsmeow),
-                    (ctypes.c_char * len(self.event.list_func)).from_buffer(d),
+                    qr_cb,
+                    login_cb,
+                    event_cb,
+                    log_cb,
+                    subscriber_buf,
                     len(d),
                     deviceprops,
                     len(deviceprops),
