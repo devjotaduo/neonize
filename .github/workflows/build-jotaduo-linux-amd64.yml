@@ -18,7 +18,9 @@ jobs:
         working-directory: goneonize
         env:
           CGO_ENABLED: "1"
-        run: go build -buildmode=c-shared -ldflags=-s -o neonize-linux-amd64.so main.go
+        # O tools/goneonize.py upstream compila só main.go, mas bufPool vive
+        # em helpers.go (package main): compilar o package inteiro.
+        run: go build -buildmode=c-shared -ldflags=-s -o neonize-linux-amd64.so .
       - uses: actions/upload-artifact@v4
         with:
           name: neonize-linux-amd64
