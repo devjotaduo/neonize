@@ -21,6 +21,22 @@ jobs:
         # O tools/goneonize.py upstream compila só main.go, mas bufPool vive
         # em helpers.go (package main): compilar o package inteiro.
         run: go build -buildmode=c-shared -ldflags=-s -o neonize-linux-amd64.so .
+      - name: Valida GetVersion do binário
+        working-directory: goneonize
+        # O load_goneonize da wheel compara GetVersion() com
+        # __GONEONIZE_VERSION__ e, se diferir, baixa o binário oficial do
+        # upstream POR CIMA — foi assim que o .so patchado foi substituído em
+        # produção (version.go da tag respondia "0.3.13"). Este gate impede
+        # publicar um .so que se autodestrói.
+        run: |
+          python3 - << 'EOF'
+          import ctypes
+          g = ctypes.CDLL("./neonize-linux-amd64.so")
+          g.GetVersion.restype = ctypes.c_char_p
+          v = g.GetVersion().decode()
+          print("GetVersion:", v)
+          assert v == "0.4.3.post0", f"GetVersion {v!r} != '0.4.3.post0'"
+          EOF
       - uses: actions/upload-artifact@v4
         with:
           name: neonize-linux-amd64
