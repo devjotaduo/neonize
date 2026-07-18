@@ -2477,12 +2477,29 @@ func SendFBMessage(id *C.char, to *C.uchar, toSize C.int, message *C.uchar, mess
 func main() {
 }
 
-func FetchMe(id string) *defproto.Device {
-	cli := clients[id].Store
+func FetchMe(ctx context.Context, id string) *defproto.Device {
+	// jotaduo 0.4.3.1: Stop() remove o cliente do map DEPOIS de Disconnect()
+	// fechar o qrChan — a thread do Neonize acorda, chega aqui e clients[id]
+	// pode já ter sumido: era SIGSEGV que derrubava o processo inteiro.
+	// Devolver nil deixa o chamador desistir limpo.
+	client, ok := clients[id]
+	if !ok || client == nil {
+		return nil
+	}
+	cli := client.Store
 
-	// Block until cli.ID is set
+	// Espera cli.ID aparecer (pareamento). Num device que nunca pareia isso
+	// era um busy-wait eterno que congelava a chamada FFI; agora o cancel do
+	// ctx (disparado pelo Stop) ou a remoção do cliente encerram a espera.
 	for cli.ID == nil {
-		time.Sleep(100 * time.Millisecond) // Check 10 times per second
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(100 * time.Millisecond): // Check 10 times per second
+		}
+		if c, ok := clients[id]; !ok || c == nil {
+			return nil
+		}
 	}
 
 	device := defproto.Device{
@@ -2504,7 +2521,13 @@ func CallbackFunction(ctx context.Context, callback C.ptr_to_python_function_byt
 	uuid := C.CString(id)
 	defer C.free(unsafe.Pointer(uuid)) // released when the client's event loop exits; was leaked once per session
 	channel := eventChannel[id]
-	buff, err := proto.Marshal(FetchMe(id))
+	me := FetchMe(ctx, id)
+	if me == nil {
+		// Cliente parado antes de parear (Stop durante o fluxo de QR):
+		// sair limpo em vez de panicar o processo.
+		return nil
+	}
+	buff, err := proto.Marshal(me)
 	if err != nil {
 		return err
 	}
